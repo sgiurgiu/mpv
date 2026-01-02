@@ -15,22 +15,12 @@
  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "config.h"
-
 #include <libplacebo/options.h>
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders/lut.h>
 #include <libplacebo/utils/libav.h>
 #include <libplacebo/utils/frame_queue.h>
 
-
-#ifdef PL_HAVE_VULKAN
-#include <libplacebo/vulkan.h>
-#endif
-
-#ifdef PL_HAVE_OPENGL
-#include <libplacebo/opengl.h>
-#endif
 
 #include "common/common.h"
 #include "common/msg.h"
@@ -42,11 +32,11 @@
 #include "video/out/placebo/ra_pl.h"
 #include "video/out/placebo/utils.h"
 #include "video/mp_image.h"
-#include "video/fmt-conversion.h"
+
 #include "sub/osd.h"
 #include "sub/draw_bmp.h"
 
-#include "mpv/render_next.h"
+#include "mpv/render_placebo.h"
 
 struct osd_entry {
     pl_tex tex;
@@ -75,20 +65,7 @@ struct priv {
     pl_renderer rr;
     pl_queue queue;
     pl_swapchain swapchain;
-
-    // Backend type
-    enum {
-        BACKEND_NONE,
-        BACKEND_VULKAN,
-        BACKEND_OPENGL,
-    } backend_type;
-
-#ifdef PL_HAVE_VULKAN
-    pl_vulkan vulkan;
-#endif
-#ifdef PL_HAVE_OPENGL
-    pl_opengl opengl;
-#endif
+    bool external_pllog;
 
     // OSD state
     pl_fmt osd_fmt[SUBBITMAP_COUNT];
@@ -226,84 +203,41 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     p->global = ctx->global;
 
     char *api = get_mpv_render_param(params, MPV_RENDER_PARAM_API_TYPE, NULL);
-    if (!api || strcmp(api, MPV_RENDER_API_TYPE_NEXT) != 0)
+    if (!api || strcmp(api, MPV_RENDER_API_TYPE_LIBPLACEBO) != 0)
         return MPV_ERROR_NOT_IMPLEMENTED;
 
     // Get optional pl_log
-    pl_log external_log = get_mpv_render_param(params, MPV_RENDER_PARAM_NEXT_PL_LOG, NULL);
+    pl_log external_log = get_mpv_render_param(params, (mpv_render_param_type) MPV_RENDER_PARAM_LIBPLACEBO_PL_LOG, NULL);
 
     // Get required swapchain
-    p->swapchain = get_mpv_render_param(params, MPV_RENDER_PARAM_NEXT_SWAPCHAIN, NULL);
+    p->swapchain = get_mpv_render_param(params, (mpv_render_param_type) MPV_RENDER_PARAM_LIBPLACEBO_SWAPCHAIN, NULL);
     if (!p->swapchain) {
-        MP_ERR(p, "MPV_RENDER_PARAM_NEXT_SWAPCHAIN is required\n");
-        return MPV_ERROR_INVALID_PARAMETER;
-    }
-
-    // Try Vulkan init
-    mpv_next_vk_init_params *vk_params = get_mpv_render_param(params,
-        MPV_RENDER_PARAM_NEXT_VK_INIT_PARAMS, NULL);
-
-    // Try OpenGL init
-    mpv_next_gl_init_params *gl_params = get_mpv_render_param(params,
-        MPV_RENDER_PARAM_NEXT_GL_INIT_PARAMS, NULL);
-
-    if (vk_params && gl_params) {
-        MP_ERR(p, "Cannot specify both Vulkan and OpenGL init params\n");
-        return MPV_ERROR_INVALID_PARAMETER;
-    }
-
-    if (!vk_params && !gl_params) {
-        MP_ERR(p, "Must specify either Vulkan or OpenGL init params\n");
+        MP_ERR(p, "MPV_RENDER_PARAM_LIBPLACEBO_SWAPCHAIN is required\n");
         return MPV_ERROR_INVALID_PARAMETER;
     }
 
     // Create or use pl_log
     if (external_log) {
         p->pllog = external_log;
+        p->external_pllog = true;
     } else {
         p->pllog = mppl_log_create(p, p->log);
         if (!p->pllog) {
             MP_ERR(p, "Failed to create libplacebo log\n");
             return MPV_ERROR_GENERIC;
         }
+        p->external_pllog = false;
     }
 
-#ifdef PL_HAVE_VULKAN
-    if (vk_params) {
-        p->backend_type = BACKEND_VULKAN;
-
-        //p->vulkan = pl_vulkan_import(p->pllog, &import_params);
-        //if (!p->vulkan) {
-        //    MP_ERR(p, "Failed to import Vulkan context\n");
-        //    return MPV_ERROR_GENERIC;
-        //}
-
-        p->gpu = p->swapchain->gpu;
-        p->ra = ra_create_pl(p->gpu, p->log);
-    }
-#else
-    if (vk_params) {
-        MP_ERR(p, "Vulkan support not compiled in libplacebo\n");
-        return MPV_ERROR_NOT_IMPLEMENTED;
-    }
-#endif
-
-#ifdef PL_HAVE_OPENGL
-    if (gl_params) {
-        p->backend_type = BACKEND_OPENGL;
-        
-        p->gpu = p->swapchain->gpu;
-        p->ra = ra_create_pl(p->gpu, p->log);
-    }
-#else
-    if (gl_params) {
-        MP_ERR(p, "OpenGL support not compiled in libplacebo\n");
-        return MPV_ERROR_NOT_IMPLEMENTED;
-    }
-#endif
-
+    p->gpu = p->swapchain->gpu;
     if (!p->gpu) {
         MP_ERR(p, "Failed to obtain GPU context\n");
+        return MPV_ERROR_GENERIC;
+    }
+
+    p->ra = ra_create_pl(p->gpu, p->log);
+    if (!p->ra) {
+        MP_ERR(p, "Failed to create ra context\n");
         return MPV_ERROR_GENERIC;
     }
 
@@ -774,19 +708,8 @@ static void destroy(struct render_backend *ctx)
     if (p->ra)
         p->ra->fns->destroy(p->ra);
 
-    // Destroy backend-specific resources
-#ifdef PL_HAVE_VULKAN
-    if (p->vulkan)
-        pl_vulkan_destroy(&p->vulkan);
-#endif
-
-#ifdef PL_HAVE_OPENGL
-    if (p->opengl)
-        pl_opengl_destroy(&p->opengl);
-#endif
-
     // Destroy pl_log if we created it
-    if (p->pllog)
+    if (!p->external_pllog && p->pllog)
         pl_log_destroy(&p->pllog);
 
     talloc_free(p);
@@ -823,7 +746,7 @@ static void update_options(struct priv *p)
     }
 }
 
-const struct render_backend_fns render_backend_gpu_next = {
+const struct render_backend_fns render_backend_libplacebo = {
     .init = init,
     .check_format = check_format,
     .set_parameter = set_parameter,
