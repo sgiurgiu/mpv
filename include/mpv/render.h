@@ -462,6 +462,14 @@ typedef enum mpv_render_param_type {
       * mpv will create its own pl_log instance.
       */
      MPV_RENDER_PARAM_NEXT_PL_LOG = 24,
+     /**
+      * Optional for mpv_render_context_render().
+      * Type: pl_options (from libplacebo)
+      *
+      * A libplacebo options context for passing rendering options. If not provided,
+      * mpv will use the default options.
+      */
+     MPV_RENDER_PARAM_NEXT_OPTIONS = 25,
 } mpv_render_param_type;
 
 /**
