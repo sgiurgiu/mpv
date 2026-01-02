@@ -422,6 +422,46 @@ typedef enum mpv_render_param_type {
      * See MPV_RENDER_PARAM_SW_STRIDE for alignment requirements.
      */
     MPV_RENDER_PARAM_SW_POINTER = 20,
+    /**
+     * Mutually exclusive with MPV_RENDER_PARAM_NEXT_GL_INIT_PARAMS.
+     * Valid for mpv_render_context_create().
+     * Type: mpv_next_vk_init_params*
+     *
+     * Initialize the gpu-next renderer with Vulkan. The client provides
+     * raw Vulkan handles which mpv will use to create libplacebo contexts.
+     */
+     MPV_RENDER_PARAM_NEXT_VK_INIT_PARAMS = 21,
+
+     /**
+      * Mutually exclusive with MPV_RENDER_PARAM_NEXT_VK_INIT_PARAMS.
+      * Valid for mpv_render_context_create().
+      * Type: mpv_next_gl_init_params*
+      *
+      * Initialize the gpu-next renderer with OpenGL. The client provides
+      * a get_proc_address callback for loading OpenGL functions.
+      */
+     MPV_RENDER_PARAM_NEXT_GL_INIT_PARAMS = 22,
+ 
+     /**
+      * Required for mpv_render_context_create().
+      * Type: pl_swapchain (from libplacebo)
+      *
+      * The swapchain that mpv will render to. The client is responsible for
+      * creating this swapchain and calling pl_swapchain_swap_buffers() after
+      * mpv_render_context_render() returns.
+      *
+      * The swapchain must remain valid for the lifetime of the render context.
+      */
+     MPV_RENDER_PARAM_NEXT_SWAPCHAIN = 23,
+ 
+     /**
+      * Optional for mpv_render_context_create().
+      * Type: pl_log (from libplacebo)
+      *
+      * A libplacebo log context for receiving log messages. If not provided,
+      * mpv will create its own pl_log instance.
+      */
+     MPV_RENDER_PARAM_NEXT_PL_LOG = 24,
 } mpv_render_param_type;
 
 /**
@@ -468,6 +508,11 @@ typedef struct mpv_render_param {
 #define MPV_RENDER_API_TYPE_OPENGL "opengl"
 // See section "Software renderer"
 #define MPV_RENDER_API_TYPE_SW "sw"
+/**
+ * API type string for gpu-next backend.
+ * Use with MPV_RENDER_PARAM_API_TYPE.
+ */
+ #define MPV_RENDER_API_TYPE_NEXT "gpu_next"
 
 /**
  * Flags used in mpv_render_frame_info.flags. Each value represents a bit in it.
