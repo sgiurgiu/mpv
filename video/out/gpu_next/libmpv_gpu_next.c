@@ -389,23 +389,12 @@ static void resize(struct render_backend *ctx, struct mp_rect *src,
                    struct mp_rect *dst, struct mp_osd_res *osd)
 {
     struct priv *p = ctx->priv;
+
+    // Store the positioning info - dst contains the centered position
+    // calculated by mp_get_src_dst_rects based on video alignment options
     p->src = *src;
     p->dst = *dst;
     p->osd_res = *osd;
-
-    // Notify swapchain of the new size
-    int w = mp_rect_w(*dst);
-    int h = mp_rect_h(*dst);
-    if (w > 0 && h > 0) {
-        if (!pl_swapchain_resize(p->swapchain, &w, &h)) {
-            MP_WARN(p, "Failed to resize swapchain to %dx%d\n", w, h);
-        }
-        // Update dst to actual swapchain size (may differ from requested)
-        p->dst.x0 = 0;
-        p->dst.y0 = 0;
-        p->dst.x1 = w;
-        p->dst.y1 = h;
-    }
 }
 
 static int get_target_size(struct render_backend *ctx, mpv_render_param *params,
