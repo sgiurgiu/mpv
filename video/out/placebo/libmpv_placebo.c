@@ -24,7 +24,8 @@
 #include <libplacebo/utils/frame_queue.h>
 #include <stdio.h>
 
-
+#include "osdep/threads.h"
+#include "misc/mp_assert.h"
 #include "common/common.h"
 #include "common/msg.h"
 #include "options/m_config.h"
@@ -71,6 +72,11 @@ struct priv {
     pl_swapchain swapchain;
     bool external_pllog;
 
+    // Allocated DR buffers
+    mp_mutex dr_lock;
+    pl_buf *dr_buffers;
+    int num_dr_buffers;
+
     // OSD state
     pl_fmt osd_fmt[SUBBITMAP_COUNT];
     pl_tex *sub_tex;
@@ -104,6 +110,39 @@ struct priv {
 };
 
 static void update_options(struct priv *p);
+
+static pl_buf get_dr_buf(struct priv *p, const uint8_t *ptr)
+{
+    mp_mutex_lock(&p->dr_lock);
+
+    for (int i = 0; i < p->num_dr_buffers; i++) {
+        pl_buf buf = p->dr_buffers[i];
+        if (ptr >= buf->data && ptr < buf->data + buf->params.size) {
+            mp_mutex_unlock(&p->dr_lock);
+            return buf;
+        }
+    }
+
+    mp_mutex_unlock(&p->dr_lock);
+    return NULL;
+}
+
+static void free_dr_buf(void *opaque, uint8_t *data)
+{
+    struct priv *p = opaque;
+    mp_mutex_lock(&p->dr_lock);
+
+    for (int i = 0; i < p->num_dr_buffers; i++) {
+        if (p->dr_buffers[i]->data == data) {
+            pl_buf_destroy(p->gpu, &p->dr_buffers[i]);
+            MP_TARRAY_REMOVE_AT(p->dr_buffers, p->num_dr_buffers, i);
+            mp_mutex_unlock(&p->dr_lock);
+            return;
+        }
+    }
+
+    MP_ASSERT_UNREACHABLE();
+}
 
 static int plane_data_from_imgfmt(struct pl_plane_data out_data[4],
                                   struct pl_bit_encoding *out_bits,
@@ -276,6 +315,9 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
 
     // Set capabilities
     ctx->driver_caps = VO_CAP_ROTATE90 | VO_CAP_FILM_GRAIN | VO_CAP_VFLIP;
+
+    // Initialize DR buffer mutex
+    mp_mutex_init(&p->dr_lock);
 
     p->last_h = p->last_w = 0;
     return 0;
@@ -482,31 +524,24 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
             data[n].row_stride = mpi->stride[n];
         }
 
-        // Keep frame data alive until GPU finishes the upload
-        // This prevents corruption from freeing mpi while GPU is still reading
-        if (gpu->limits.callbacks) {
+        // Check if frame is in a DR buffer (zero-copy path)
+        pl_buf buf = get_dr_buf(p, data[n].pixels);
+        if (buf) {
+            data[n].buf = buf;
+            data[n].buf_offset = (uint8_t *) data[n].pixels - buf->data;
+            data[n].pixels = NULL;
+        } else if (gpu->limits.callbacks) {
+            // Keep frame data alive until GPU finishes the upload
             data[n].callback = talloc_free;
             data[n].priv = mp_image_new_ref(mpi);
         }
-        else {
-            // Without callbacks, we need to ensure synchronous upload
-            // Store reference in frame_priv to keep it alive until unmap
-            if (!fp->hwdec) {
-                fp->hwdec = (void*)mp_image_new_ref(mpi); // Temporary storage
-            }
-        }
+
         if (!pl_upload_plane(gpu, plane, &tex[n], &data[n])) {
             MP_ERR(p, "Failed uploading frame!\n");
             talloc_free(data[n].priv);
             talloc_free(mpi);
             return false;
         }
-    }
-
-    // If no callback support, we need to ensure GPU has finished
-    // before the frame can be unmapped
-    if (!gpu->limits.callbacks) {
-        pl_gpu_finish(gpu);  // Wait for upload to complete
     }
 
     pl_frame_set_chroma_location(frame, par.chroma_location);
@@ -721,8 +756,37 @@ static struct mp_image *get_image(struct render_backend *ctx, int imgfmt,
     if (!gpu->limits.thread_safe || !gpu->limits.max_mapped_size)
         return NULL;
 
-    // DR (direct rendering) support could be added here
-    return NULL;
+    if ((flags & VO_DR_FLAG_HOST_CACHED) && !gpu->limits.host_cached)
+        return NULL;
+
+    stride_align = mp_lcm(stride_align, gpu->limits.align_tex_xfer_pitch);
+    stride_align = mp_lcm(stride_align, gpu->limits.align_tex_xfer_offset);
+    int size = mp_image_get_alloc_size(imgfmt, w, h, stride_align);
+    if (size < 0)
+        return NULL;
+
+    pl_buf buf = pl_buf_create(gpu, &(struct pl_buf_params) {
+        .memory_type = PL_BUF_MEM_HOST,
+        .host_mapped = true,
+        .size = size + stride_align,
+    });
+
+    if (!buf)
+        return NULL;
+
+    struct mp_image *mpi = mp_image_from_buffer(imgfmt, w, h, stride_align,
+                                                buf->data, buf->params.size,
+                                                p, free_dr_buf);
+    if (!mpi) {
+        pl_buf_destroy(gpu, &buf);
+        return NULL;
+    }
+
+    mp_mutex_lock(&p->dr_lock);
+    MP_TARRAY_APPEND(p, p->dr_buffers, p->num_dr_buffers, buf);
+    mp_mutex_unlock(&p->dr_lock);
+
+    return mpi;
 }
 
 static void screenshot(struct render_backend *ctx, struct vo_frame *frame,
@@ -760,6 +824,10 @@ static void destroy(struct render_backend *ctx)
         ra_hwdec_mapper_free(&p->hwdec_mapper);
     ra_hwdec_ctx_uninit(&p->hwdec_ctx);
     hwdec_devices_destroy(ctx->hwdec_devs);
+
+    // All DR buffers should be freed by now (decoder released them)
+    mp_assert(p->num_dr_buffers == 0);
+    mp_mutex_destroy(&p->dr_lock);
 
     // Destroy renderer
     pl_renderer_destroy(&p->rr);
