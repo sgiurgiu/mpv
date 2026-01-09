@@ -76,6 +76,13 @@ extern "C" {
       */
      MPV_RENDER_PARAM_LIBPLACEBO_OPTIONS = 103,
 
+     /**
+      * Optional for mpv_render_context_create().
+      * Type: bool
+      *
+      * If true, the user will be responsible to call pl_swapchain_swap_buffers() after rendering.
+      */
+     MPV_RENDER_PARAM_LIBPLACEBO_EXTERNAL_SWAPCHAIN_SWAP_BUFFERS = 104,
  };
 
 /**
