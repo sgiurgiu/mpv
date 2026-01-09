@@ -31,8 +31,6 @@
 #include "video/out/libmpv.h"
 #include "video/out/gpu/video.h"
 #include "video/out/gpu/video_shaders.h"
-#include "video/out/gpu/hwdec.h"
-#include "video/out/placebo/ra_pl.h"
 #include "video/out/placebo/utils.h"
 #include "video/mp_image.h"
 
@@ -41,10 +39,6 @@
 
 #include "mpv/render_placebo.h"
 
-#if HAVE_GL && defined(PL_HAVE_OPENGL)
-#include <libplacebo/opengl.h>
-#include "video/out/opengl/ra_gl.h"
-#endif
 
 
 struct osd_entry {
@@ -62,7 +56,6 @@ struct frame_priv {
     struct priv *p;  // Back-reference to main priv
     struct overlay_state subs;
     uint64_t osd_sync;
-    struct ra_hwdec *hwdec;
 };
 
 struct priv {
@@ -102,102 +95,13 @@ struct priv {
     pl_options pars;
     struct m_config_cache *opts_cache;
 
-    // Hardware decoding
-    struct ra_hwdec_ctx hwdec_ctx;
-    struct ra_hwdec_mapper *hwdec_mapper;
-    struct mp_hwdec_devices *hwdec_devs;
-
-    // For ra interop (needed for hwdec)
-    struct ra *ra;
-
     int last_w;
     int last_h;
+
+    // If true, the user will be responsible to call pl_swapchain_swap_buffers() after rendering.
+    // This is useful for when the user wants to control the swapchain swap buffers themselves.
+    bool external_swapchain_swap_buffers;
 };
-
-static pl_tex hwdec_get_tex(struct priv *p, int n)
-{
-    struct ra_tex *ratex = p->hwdec_mapper->tex[n];
-    struct ra *ra = p->hwdec_mapper->ra;
-    if (ra_pl_get(ra))
-        return (pl_tex) ratex->priv;
-
-#if HAVE_GL && defined(PL_HAVE_OPENGL)
-    if (ra_is_gl(ra) && pl_opengl_get(p->gpu)) {
-        struct pl_opengl_wrap_params par = {
-            .width = ratex->params.w,
-            .height = ratex->params.h,
-        };
-
-        ra_gl_get_format(ratex->params.format, &par.iformat,
-                         &(GLenum){0}, &(GLenum){0});
-        ra_gl_get_raw_tex(ra, ratex, &par.texture, &par.target);
-        return pl_opengl_wrap(p->gpu, &par);
-    }
-#endif
-
-    MP_ERR(p, "Failed mapping hwdec frame? Open a bug!\n");
-    return false;
-}
-
-
-static bool hwdec_reconfig(struct priv *p, struct ra_hwdec *hwdec,
-    const struct mp_image_params *par)
-{
-    if (p->hwdec_mapper) {
-        if (mp_image_params_static_equal(par, &p->hwdec_mapper->src_params)) {
-            p->hwdec_mapper->src_params.repr.dovi = par->repr.dovi;
-            p->hwdec_mapper->dst_params.repr.dovi = par->repr.dovi;
-            p->hwdec_mapper->src_params.color.hdr = par->color.hdr;
-            p->hwdec_mapper->dst_params.color.hdr = par->color.hdr;
-            return p->hwdec_mapper;
-        } else {
-            ra_hwdec_mapper_free(&p->hwdec_mapper);
-        }
-    }
-
-    p->hwdec_mapper = ra_hwdec_mapper_create(hwdec, par);
-    if (!p->hwdec_mapper) {
-        MP_ERR(p, "Initializing texture for hardware decoding failed.\n");
-        return NULL;
-    }
-
-    return p->hwdec_mapper;
-}
-
-
-static bool hwdec_acquire(pl_gpu gpu, struct pl_frame *frame)
-{
-    struct mp_image *mpi = frame->user_data;
-    struct frame_priv *fp = mpi->priv;
-    struct priv *p = fp->p;
-    if (!hwdec_reconfig(p, fp->hwdec, &mpi->params))
-        return false;
-
-    if (ra_hwdec_mapper_map(p->hwdec_mapper, mpi) < 0) {
-        MP_ERR(p, "Mapping hardware decoded surface failed.\n");
-        return false;
-    }
-
-    for (int n = 0; n < frame->num_planes; n++) {
-        if (!(frame->planes[n].texture = hwdec_get_tex(p, n)))
-            return false;
-    }
-
-    return true;
-}
-
-static void hwdec_release(pl_gpu gpu, struct pl_frame *frame)
-{
-    struct mp_image *mpi = frame->user_data;
-    struct frame_priv *fp = mpi->priv;
-    struct priv *p = fp->p;
-    if (!ra_pl_get(p->hwdec_mapper->ra)) {
-        for (int n = 0; n < frame->num_planes; n++)
-            pl_tex_destroy(p->gpu, &frame->planes[n].texture);
-    }
-
-    ra_hwdec_mapper_unmap(p->hwdec_mapper);
-}
 
 static void update_options(struct priv *p);
 
@@ -370,12 +274,6 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
         return MPV_ERROR_GENERIC;
     }
 
-    p->ra = ra_create_pl(p->gpu, p->log);
-    if (!p->ra) {
-        MP_ERR(p, "Failed to create ra context\n");
-        return MPV_ERROR_GENERIC;
-    }
-
     // Create renderer and queue
     p->rr = pl_renderer_create(p->pllog, p->gpu);
     if (!p->rr) {
@@ -398,11 +296,10 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     p->pars = pl_options_alloc(p->pllog);
     p->opts_cache = m_config_cache_alloc(p, p->global, &gl_video_conf);
 
-    // Note: Hardware decoding is not supported in the libmpv render API with
-    // external swapchain because ra_hwdec requires ra_ctx which we don't have.
-    // Users should use --hwdec=no for software decoding with DR buffers.
-    ctx->hwdec_devs = hwdec_devices_create();
-    p->hwdec_devs = ctx->hwdec_devs;
+    // Note: Hardware decoding is not supported in this backend.
+    // The libmpv render API with external swapchain doesn't have ra_ctx,
+    // which is required by mpv's hwdec system. Use --hwdec=no.
+    ctx->hwdec_devs = NULL;
 
     // Set capabilities
     ctx->driver_caps = VO_CAP_ROTATE90 | VO_CAP_FILM_GRAIN | VO_CAP_VFLIP;
@@ -411,6 +308,9 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     mp_mutex_init(&p->dr_lock);
 
     p->last_h = p->last_w = 0;
+    p->external_swapchain_swap_buffers = 
+        GET_MPV_RENDER_PARAM(params, (mpv_render_param_type) MPV_RENDER_PARAM_LIBPLACEBO_EXTERNAL_SWAPCHAIN_SWAP_BUFFERS,
+        bool, false);
     return 0;
 }
 
@@ -586,21 +486,6 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
     struct priv *p = fp->p;
 
     struct mp_image_params par = mpi->params;
-
-    fp->hwdec = ra_hwdec_get(&p->hwdec_ctx, mpi->imgfmt);
-    if (fp->hwdec) {
-        // Note: We don't actually need the mapper to map the frame yet, we
-        // only reconfig the mapper here (potentially creating it) to access
-        // `dst_params`. In practice, though, this should not matter unless the
-        // image format changes mid-stream.
-        if (!hwdec_reconfig(p, fp->hwdec, &mpi->params)) {
-            talloc_free(mpi);
-            return false;
-        }
-
-        par = p->hwdec_mapper->dst_params;
-    }
-
     mp_image_params_guess_csp(&par);
 
     *frame = (struct pl_frame) {
@@ -614,70 +499,46 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
         .user_data = mpi,
     };
 
-    if (fp->hwdec) {
-        struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(par.imgfmt);
-        frame->acquire = hwdec_acquire;
-        frame->release = hwdec_release;
-        frame->num_planes = desc.num_planes;
-        for (int n = 0; n < frame->num_planes; n++) {
-            struct pl_plane *plane = &frame->planes[n];
-            int *map = plane->component_mapping;
-            for (int c = 0; c < mp_imgfmt_desc_get_num_comps(&desc); c++) {
-                if (desc.comps[c].plane != n)
-                    continue;
+    // Software decoding path (hwdec not supported in this backend)
+    struct pl_plane_data data[4] = {0};
+    frame->num_planes = plane_data_from_imgfmt(data, &frame->repr.bits, mpi->imgfmt);
 
-                // Sort by component offset
-                uint8_t offset = desc.comps[c].offset;
-                int index = plane->components++;
-                while (index > 0 && desc.comps[map[index - 1]].offset > offset) {
-                    map[index] = map[index - 1];
-                    index--;
-                }
-                map[index] = c;
-            }
+    if (!frame->num_planes) {
+        // Unsupported format (likely hwdec frame - use --hwdec=no)
+        MP_ERR(p, "Unsupported frame format: %s (use --hwdec=no)\n", mp_imgfmt_to_name(mpi->imgfmt));
+        talloc_free(mpi);
+        return false;
+    }
+
+    for (int n = 0; n < frame->num_planes; n++) {
+        struct pl_plane *plane = &frame->planes[n];
+        data[n].width = mp_image_plane_w(mpi, n);
+        data[n].height = mp_image_plane_h(mpi, n);
+
+        if (mpi->stride[n] < 0) {
+            data[n].pixels = mpi->planes[n] + (data[n].height - 1) * mpi->stride[n];
+            data[n].row_stride = -mpi->stride[n];
+            plane->flipped = true;
+        } else {
+            data[n].pixels = mpi->planes[n];
+            data[n].row_stride = mpi->stride[n];
         }
-    } else { 
-        // Software decoding path
-        struct pl_plane_data data[4] = {0};
-        frame->num_planes = plane_data_from_imgfmt(data, &frame->repr.bits, mpi->imgfmt);
 
-        if (!frame->num_planes) {
-            // Unsupported format (likely hwdec frame we can't handle)
-            MP_ERR(p, "Unsupported frame format: %s\n", mp_imgfmt_to_name(mpi->imgfmt));
+        // Check if frame is in a DR buffer (zero-copy path)
+        pl_buf buf = get_dr_buf(p, data[n].pixels);
+        if (buf) {
+            data[n].buf = buf;
+            data[n].buf_offset = (uint8_t *) data[n].pixels - buf->data;
+            data[n].pixels = NULL;
+        } else if (gpu->limits.callbacks) {
+            data[n].callback = talloc_free;
+            data[n].priv = mp_image_new_ref(mpi);
+        }
+
+        if (!pl_upload_plane(gpu, plane, &tex[n], &data[n])) {
+            MP_ERR(p, "Failed uploading frame!\n");
             talloc_free(mpi);
             return false;
-        }
-
-        for (int n = 0; n < frame->num_planes; n++) {
-            struct pl_plane *plane = &frame->planes[n];
-            data[n].width = mp_image_plane_w(mpi, n);
-            data[n].height = mp_image_plane_h(mpi, n);
-
-            if (mpi->stride[n] < 0) {
-                data[n].pixels = mpi->planes[n] + (data[n].height - 1) * mpi->stride[n];
-                data[n].row_stride = -mpi->stride[n];
-                plane->flipped = true;
-            } else {
-                data[n].pixels = mpi->planes[n];
-                data[n].row_stride = mpi->stride[n];
-            }
-
-            // Check if frame is in a DR buffer (zero-copy path)
-            pl_buf buf = get_dr_buf(p, data[n].pixels);
-            if (buf) {
-                data[n].buf = buf;
-                data[n].buf_offset = (uint8_t *) data[n].pixels - buf->data;
-                data[n].pixels = NULL;
-            } else if (gpu->limits.callbacks) {
-                data[n].callback = talloc_free;
-                data[n].priv = mp_image_new_ref(mpi);
-            }
-
-            if (!pl_upload_plane(gpu, plane, &tex[n], &data[n])) {
-                MP_ERR(p, "Failed uploading frame!\n");
-                talloc_free(mpi);
-                return false;
-            }
         }
     }
 
@@ -898,9 +759,9 @@ submit:
         MP_ERR(p, "Failed submitting frame to swapchain!\n");
         return MPV_ERROR_GENERIC;
     }
-
-    // Swap buffers to present the frame
-    pl_swapchain_swap_buffers(p->swapchain);
+    if (!p->external_swapchain_swap_buffers) {
+        pl_swapchain_swap_buffers(p->swapchain);
+    }
 
     return 0;
 }
@@ -978,11 +839,6 @@ static void destroy(struct render_backend *ctx)
         pl_tex_destroy(p->gpu, &p->sub_tex[i]);
 
     // Destroy hwdec
-    if (p->hwdec_mapper)
-        ra_hwdec_mapper_free(&p->hwdec_mapper);
-    ra_hwdec_ctx_uninit(&p->hwdec_ctx);
-    hwdec_devices_destroy(ctx->hwdec_devs);
-
     // All DR buffers should be freed by now (decoder released them)
     mp_assert(p->num_dr_buffers == 0);
     mp_mutex_destroy(&p->dr_lock);
@@ -992,10 +848,6 @@ static void destroy(struct render_backend *ctx)
 
     // Destroy options
     pl_options_free(&p->pars);
-
-    // Destroy RA
-    if (p->ra)
-        p->ra->fns->destroy(p->ra);
 
     // Destroy pl_log if we created it
     if (!p->external_pllog && p->pllog)
