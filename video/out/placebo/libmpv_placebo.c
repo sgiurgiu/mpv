@@ -398,14 +398,11 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     p->pars = pl_options_alloc(p->pllog);
     p->opts_cache = m_config_cache_alloc(p, p->global, &gl_video_conf);
 
-    // Initialize hwdec context
+    // Note: Hardware decoding is not supported in the libmpv render API with
+    // external swapchain because ra_hwdec requires ra_ctx which we don't have.
+    // Users should use --hwdec=no for software decoding with DR buffers.
     ctx->hwdec_devs = hwdec_devices_create();
     p->hwdec_devs = ctx->hwdec_devs;
-    p->hwdec_ctx = (struct ra_hwdec_ctx) {
-        .log = p->log,
-        .global = p->global,
-        .ra_ctx = NULL,  // No ra_ctx in libmpv mode
-    };
 
     // Set capabilities
     ctx->driver_caps = VO_CAP_ROTATE90 | VO_CAP_FILM_GRAIN | VO_CAP_VFLIP;
@@ -421,10 +418,8 @@ static bool check_format(struct render_backend *ctx, int imgfmt)
 {
     struct priv *p = ctx->priv;
 
-    // Check hwdec formats
-    if (ra_hwdec_get(&p->hwdec_ctx, imgfmt))
-        return true;
-
+    // Note: Hardware decoding is not supported in the libmpv render API
+    // with external swapchain. Use software decoding (--hwdec=no).
     return format_supported(p, imgfmt);
 }
 
@@ -645,6 +640,13 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
         // Software decoding path
         struct pl_plane_data data[4] = {0};
         frame->num_planes = plane_data_from_imgfmt(data, &frame->repr.bits, mpi->imgfmt);
+
+        if (!frame->num_planes) {
+            // Unsupported format (likely hwdec frame we can't handle)
+            MP_ERR(p, "Unsupported frame format: %s\n", mp_imgfmt_to_name(mpi->imgfmt));
+            talloc_free(mpi);
+            return false;
+        }
 
         for (int n = 0; n < frame->num_planes; n++) {
             struct pl_plane *plane = &frame->planes[n];
