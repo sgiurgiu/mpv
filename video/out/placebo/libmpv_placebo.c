@@ -22,7 +22,6 @@
 #include <libplacebo/log.h>
 #include <libplacebo/utils/libav.h>
 #include <libplacebo/utils/frame_queue.h>
-#include <stdio.h>
 
 #include "osdep/threads.h"
 #include "misc/mp_assert.h"
@@ -41,6 +40,12 @@
 #include "sub/draw_bmp.h"
 
 #include "mpv/render_placebo.h"
+
+#if HAVE_GL && defined(PL_HAVE_OPENGL)
+#include <libplacebo/opengl.h>
+#include "video/out/opengl/ra_gl.h"
+#endif
+
 
 struct osd_entry {
     pl_tex tex;
@@ -109,6 +114,91 @@ struct priv {
     int last_h;
 };
 
+static pl_tex hwdec_get_tex(struct priv *p, int n)
+{
+    struct ra_tex *ratex = p->hwdec_mapper->tex[n];
+    struct ra *ra = p->hwdec_mapper->ra;
+    if (ra_pl_get(ra))
+        return (pl_tex) ratex->priv;
+
+#if HAVE_GL && defined(PL_HAVE_OPENGL)
+    if (ra_is_gl(ra) && pl_opengl_get(p->gpu)) {
+        struct pl_opengl_wrap_params par = {
+            .width = ratex->params.w,
+            .height = ratex->params.h,
+        };
+
+        ra_gl_get_format(ratex->params.format, &par.iformat,
+                         &(GLenum){0}, &(GLenum){0});
+        ra_gl_get_raw_tex(ra, ratex, &par.texture, &par.target);
+        return pl_opengl_wrap(p->gpu, &par);
+    }
+#endif
+
+    MP_ERR(p, "Failed mapping hwdec frame? Open a bug!\n");
+    return false;
+}
+
+
+static bool hwdec_reconfig(struct priv *p, struct ra_hwdec *hwdec,
+    const struct mp_image_params *par)
+{
+    if (p->hwdec_mapper) {
+        if (mp_image_params_static_equal(par, &p->hwdec_mapper->src_params)) {
+            p->hwdec_mapper->src_params.repr.dovi = par->repr.dovi;
+            p->hwdec_mapper->dst_params.repr.dovi = par->repr.dovi;
+            p->hwdec_mapper->src_params.color.hdr = par->color.hdr;
+            p->hwdec_mapper->dst_params.color.hdr = par->color.hdr;
+            return p->hwdec_mapper;
+        } else {
+            ra_hwdec_mapper_free(&p->hwdec_mapper);
+        }
+    }
+
+    p->hwdec_mapper = ra_hwdec_mapper_create(hwdec, par);
+    if (!p->hwdec_mapper) {
+        MP_ERR(p, "Initializing texture for hardware decoding failed.\n");
+        return NULL;
+    }
+
+    return p->hwdec_mapper;
+}
+
+
+static bool hwdec_acquire(pl_gpu gpu, struct pl_frame *frame)
+{
+    struct mp_image *mpi = frame->user_data;
+    struct frame_priv *fp = mpi->priv;
+    struct priv *p = fp->p;
+    if (!hwdec_reconfig(p, fp->hwdec, &mpi->params))
+        return false;
+
+    if (ra_hwdec_mapper_map(p->hwdec_mapper, mpi) < 0) {
+        MP_ERR(p, "Mapping hardware decoded surface failed.\n");
+        return false;
+    }
+
+    for (int n = 0; n < frame->num_planes; n++) {
+        if (!(frame->planes[n].texture = hwdec_get_tex(p, n)))
+            return false;
+    }
+
+    return true;
+}
+
+static void hwdec_release(pl_gpu gpu, struct pl_frame *frame)
+{
+    struct mp_image *mpi = frame->user_data;
+    struct frame_priv *fp = mpi->priv;
+    struct priv *p = fp->p;
+    if (!ra_pl_get(p->hwdec_mapper->ra)) {
+        for (int n = 0; n < frame->num_planes; n++)
+            pl_tex_destroy(p->gpu, &frame->planes[n].texture);
+    }
+
+    ra_hwdec_mapper_unmap(p->hwdec_mapper);
+}
+
 static void update_options(struct priv *p);
 
 static pl_buf get_dr_buf(struct priv *p, const uint8_t *ptr)
@@ -151,7 +241,6 @@ static int plane_data_from_imgfmt(struct pl_plane_data out_data[4],
     struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(imgfmt);
     if (!desc.num_planes || !(desc.flags & MP_IMGFLAG_HAS_COMPS))
         return 0;
-
     if (desc.flags & MP_IMGFLAG_HWACCEL)
         return 0;
 
@@ -312,6 +401,11 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     // Initialize hwdec context
     ctx->hwdec_devs = hwdec_devices_create();
     p->hwdec_devs = ctx->hwdec_devs;
+    p->hwdec_ctx = (struct ra_hwdec_ctx) {
+        .log = p->log,
+        .global = p->global,
+        .ra_ctx = NULL,  // No ra_ctx in libmpv mode
+    };
 
     // Set capabilities
     ctx->driver_caps = VO_CAP_ROTATE90 | VO_CAP_FILM_GRAIN | VO_CAP_VFLIP;
@@ -497,50 +591,91 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
     struct priv *p = fp->p;
 
     struct mp_image_params par = mpi->params;
+
+    fp->hwdec = ra_hwdec_get(&p->hwdec_ctx, mpi->imgfmt);
+    if (fp->hwdec) {
+        // Note: We don't actually need the mapper to map the frame yet, we
+        // only reconfig the mapper here (potentially creating it) to access
+        // `dst_params`. In practice, though, this should not matter unless the
+        // image format changes mid-stream.
+        if (!hwdec_reconfig(p, fp->hwdec, &mpi->params)) {
+            talloc_free(mpi);
+            return false;
+        }
+
+        par = p->hwdec_mapper->dst_params;
+    }
+
     mp_image_params_guess_csp(&par);
 
     *frame = (struct pl_frame) {
         .color = par.color,
         .repr = par.repr,
+        .profile = {
+            .data = mpi->icc_profile ? mpi->icc_profile->data : NULL,
+            .len = mpi->icc_profile ? mpi->icc_profile->size : 0,
+        },
         .rotation = par.rotate / 90,
         .user_data = mpi,
     };
 
-    // Software decoding path
-    struct pl_plane_data data[4] = {0};
-    frame->num_planes = plane_data_from_imgfmt(data, &frame->repr.bits, mpi->imgfmt);
+    if (fp->hwdec) {
+        struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(par.imgfmt);
+        frame->acquire = hwdec_acquire;
+        frame->release = hwdec_release;
+        frame->num_planes = desc.num_planes;
+        for (int n = 0; n < frame->num_planes; n++) {
+            struct pl_plane *plane = &frame->planes[n];
+            int *map = plane->component_mapping;
+            for (int c = 0; c < mp_imgfmt_desc_get_num_comps(&desc); c++) {
+                if (desc.comps[c].plane != n)
+                    continue;
 
-    for (int n = 0; n < frame->num_planes; n++) {
-        struct pl_plane *plane = &frame->planes[n];
-        data[n].width = mp_image_plane_w(mpi, n);
-        data[n].height = mp_image_plane_h(mpi, n);
-
-        if (mpi->stride[n] < 0) {
-            data[n].pixels = mpi->planes[n] + (data[n].height - 1) * mpi->stride[n];
-            data[n].row_stride = -mpi->stride[n];
-            plane->flipped = true;
-        } else {
-            data[n].pixels = mpi->planes[n];
-            data[n].row_stride = mpi->stride[n];
+                // Sort by component offset
+                uint8_t offset = desc.comps[c].offset;
+                int index = plane->components++;
+                while (index > 0 && desc.comps[map[index - 1]].offset > offset) {
+                    map[index] = map[index - 1];
+                    index--;
+                }
+                map[index] = c;
+            }
         }
+    } else { 
+        // Software decoding path
+        struct pl_plane_data data[4] = {0};
+        frame->num_planes = plane_data_from_imgfmt(data, &frame->repr.bits, mpi->imgfmt);
 
-        // Check if frame is in a DR buffer (zero-copy path)
-        pl_buf buf = get_dr_buf(p, data[n].pixels);
-        if (buf) {
-            data[n].buf = buf;
-            data[n].buf_offset = (uint8_t *) data[n].pixels - buf->data;
-            data[n].pixels = NULL;
-        } else if (gpu->limits.callbacks) {
-            // Keep frame data alive until GPU finishes the upload
-            data[n].callback = talloc_free;
-            data[n].priv = mp_image_new_ref(mpi);
-        }
+        for (int n = 0; n < frame->num_planes; n++) {
+            struct pl_plane *plane = &frame->planes[n];
+            data[n].width = mp_image_plane_w(mpi, n);
+            data[n].height = mp_image_plane_h(mpi, n);
 
-        if (!pl_upload_plane(gpu, plane, &tex[n], &data[n])) {
-            MP_ERR(p, "Failed uploading frame!\n");
-            talloc_free(data[n].priv);
-            talloc_free(mpi);
-            return false;
+            if (mpi->stride[n] < 0) {
+                data[n].pixels = mpi->planes[n] + (data[n].height - 1) * mpi->stride[n];
+                data[n].row_stride = -mpi->stride[n];
+                plane->flipped = true;
+            } else {
+                data[n].pixels = mpi->planes[n];
+                data[n].row_stride = mpi->stride[n];
+            }
+
+            // Check if frame is in a DR buffer (zero-copy path)
+            pl_buf buf = get_dr_buf(p, data[n].pixels);
+            if (buf) {
+                data[n].buf = buf;
+                data[n].buf_offset = (uint8_t *) data[n].pixels - buf->data;
+                data[n].pixels = NULL;
+            } else if (gpu->limits.callbacks) {
+                data[n].callback = talloc_free;
+                data[n].priv = mp_image_new_ref(mpi);
+            }
+
+            if (!pl_upload_plane(gpu, plane, &tex[n], &data[n])) {
+                MP_ERR(p, "Failed uploading frame!\n");
+                talloc_free(mpi);
+                return false;
+            }
         }
     }
 
@@ -559,15 +694,10 @@ static void unmap_frame(pl_gpu gpu, struct pl_frame *frame,
     struct frame_priv *fp = mpi->priv;
     struct priv *p = fp->p;
 
-    // Free any temporary reference we stored
-    if (fp->hwdec) {
-        talloc_free(fp->hwdec);
-        fp->hwdec = NULL;
-    }
-    // // Save OSD textures for reuse
+    // Save OSD textures for reuse
     for (int i = 0; i < MP_ARRAY_SIZE(fp->subs.entries); i++) {
-         pl_tex tex = fp->subs.entries[i].tex;
-         if (tex)
+        pl_tex tex = fp->subs.entries[i].tex;
+        if (tex)
             MP_TARRAY_APPEND(p, p->sub_tex, p->num_sub_tex, tex);
     }
     talloc_free(mpi);
@@ -585,6 +715,7 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     struct priv *p = ctx->priv;
 
     update_options(p);
+
     const struct gl_video_opts *opts = p->opts_cache->opts;
     bool can_interpolate = opts->interpolation && frame->display_synced &&
                            !frame->still && frame->num_frames > 1;
@@ -592,37 +723,45 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
 
     struct pl_source_frame vpts;
     if (frame->current && !p->want_reset) {
+        // Check for backward PTS jump
         if (pl_queue_peek(p->queue, 0, &vpts) &&
             frame->current->pts + MPMAX(0, pts_offset) < vpts.pts)
         {
+            MP_VERBOSE(p, "PTS discontinuity (backward): current=%f queue=%f\n",
+                       frame->current->pts, vpts.pts);
             p->want_reset = true;
         }
-    }
-
-    // Handle reset
-    if (p->want_reset) {
-        pl_renderer_flush_cache(p->rr);
-        pl_queue_reset(p->queue);
-        p->last_pts = 0.0;
-        p->last_id = 0;
-        p->want_reset = false;
+        // Check for large forward PTS jump (common in streams)
+        if (p->last_pts > 0 && frame->current->pts > p->last_pts + 5.0) {
+            MP_VERBOSE(p, "PTS discontinuity (forward): current=%f last=%f\n",
+                       frame->current->pts, p->last_pts);
+            p->want_reset = true;
+        }
     }
 
     // Push incoming frames to queue
     for (int n = 0; n < frame->num_frames; n++) {
         int id = frame->frame_id + n;
+
+        // Handle reset inside the loop to properly handle discontinuities
+        if (p->want_reset) {
+            pl_renderer_flush_cache(p->rr);
+            pl_queue_reset(p->queue);
+            p->last_pts = 0.0;
+            p->last_id = 0;
+            p->want_reset = false;
+        }
+
         if (id <= p->last_id)
             continue;
 
-        // Make a full copy of the frame data, not just a reference
-        // This prevents corruption when decoder reuses buffers (common with streams)
         struct mp_image *mpi = mp_image_new_ref(frame->frames[n]);
         if (!mpi) {
-            MP_ERR(p, "Failed to copy frame\n");
+            MP_ERR(p, "Failed to ref frame\n");
             continue;
         }
         struct frame_priv *fp = talloc_zero(mpi, struct frame_priv);
-        fp->p = p;  // Store back-reference
+        fp->p = p;
         mpi->priv = fp;
 
         pl_queue_push(p->queue, &(struct pl_source_frame) {
@@ -636,12 +775,19 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
 
         p->last_id = id;
     }
+
     pl_swapchain_colorspace_hint(p->swapchain, NULL);
 
     // Start swapchain frame
     struct pl_swapchain_frame swframe;
     if (!pl_swapchain_start_frame(p->swapchain, &swframe)) {
-        MP_ERR(p, "Failed to start swapchain frame\n");
+        if (frame->current) {
+            struct pl_queue_params qparams = *pl_queue_params(
+                .pts = frame->current->pts + pts_offset,
+                .radius = pl_frame_mix_radius(&p->pars->params),
+            );
+            pl_queue_update(p->queue, NULL, &qparams);
+        }
         return MPV_ERROR_GENERIC;
     }
 
@@ -653,7 +799,7 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     target.overlays = NULL;
     target.num_overlays = 0;
 
-    // Set up target crop - use full framebuffer if dst is not set
+    // Set up target crop
     if (p->dst.x1 > p->dst.x0 && p->dst.y1 > p->dst.y0) {
         target.crop = (struct pl_rect2df) {
             .x0 = p->dst.x0,
@@ -662,7 +808,6 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
             .y1 = p->dst.y1,
         };
     } else {
-        // Use full framebuffer size
         target.crop = (struct pl_rect2df) {
             .x0 = 0,
             .y0 = 0,
@@ -675,17 +820,20 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     struct pl_frame_mix mix = {0};
     if (frame->current) {
         struct pl_queue_params qparams = *pl_queue_params(
-            .pts = frame->current->pts,
+            .pts = frame->current->pts + pts_offset,
             .radius = pl_frame_mix_radius(&p->pars->params),
+            .vsync_duration = can_interpolate ? frame->ideal_frame_vsync_duration : 0,
+            .interpolation_threshold = opts->interpolation_threshold,
         );
+#if PL_API_VER >= 340
+        qparams.drift_compensation = 0;
+#endif
 
-        // Adjust PTS if requested time is before first available frame
-        // This helps with streams that have irregular timing
         struct pl_source_frame first;
         if (pl_queue_peek(p->queue, 0, &first) && qparams.pts < first.pts) {
-            MP_VERBOSE(p, "Clamping PTS from %f to %f\n", qparams.pts, first.pts);
             qparams.pts = first.pts;
         }
+        p->last_pts = qparams.pts;
 
         switch (pl_queue_update(p->queue, &mix, &qparams)) {
         case PL_QUEUE_ERR:
@@ -693,7 +841,6 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
             pl_tex_clear(p->gpu, swframe.fbo, (float[4]){ 0.5, 0.0, 1.0, 1.0 });
             goto submit;
         case PL_QUEUE_EOF:
-            break;
         case PL_QUEUE_MORE:
         case PL_QUEUE_OK:
             break;
@@ -703,7 +850,6 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
         for (int i = 0; i < mix.num_frames; i++) {
             struct pl_frame *image = (struct pl_frame *) mix.frames[i];
             struct mp_image *mpi = image->user_data;
-            // Use configured crop if set, otherwise use full image
             if (p->src.x1 > p->src.x0 && p->src.y1 > p->src.y0) {
                 image->crop = (struct pl_rect2df) {
                     .x0 = p->src.x0,
@@ -727,22 +873,32 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
 
     // Render
     struct pl_render_params render_params = p->pars->params;
-    
-    if (!pl_render_image_mix(p->rr, &mix, &target, &render_params)) {
-        MP_ERR(p, "Failed rendering frame!\n");
-        pl_tex_clear(p->gpu, swframe.fbo, (float[4]){ 0.5, 0.0, 1.0, 1.0 });
+
+    // Only enable frame mixing when we can actually interpolate
+    if (!can_interpolate || mix.num_frames < 2)
+        render_params.frame_mixer = NULL;
+
+    if (mix.num_frames > 0) {
+        if (!pl_render_image_mix(p->rr, &mix, &target, &render_params)) {
+            MP_ERR(p, "Failed rendering frame!\n");
+            pl_tex_clear(p->gpu, swframe.fbo, (float[4]){ 0.5, 0.0, 1.0, 1.0 });
+        }
+    } else {
+        pl_tex_clear(p->gpu, swframe.fbo, (float[4]){ 0.0, 0.0, 0.0, 1.0 });
     }
     
 
-    // Flush GPU commands before submitting (matches vo_gpu_next behavior)
+    // Flush GPU commands
     pl_gpu_flush(p->gpu);
-    //pl_gpu_finish(p->gpu);
 
 submit:
     if (!pl_swapchain_submit_frame(p->swapchain)) {
         MP_ERR(p, "Failed submitting frame to swapchain!\n");
         return MPV_ERROR_GENERIC;
     }
+
+    // Swap buffers to present the frame
+    pl_swapchain_swap_buffers(p->swapchain);
 
     return 0;
 }
