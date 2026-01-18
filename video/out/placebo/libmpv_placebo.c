@@ -640,18 +640,27 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     }
 
     pl_swapchain_colorspace_hint(p->swapchain, NULL);
-
     // Start swapchain frame
     struct pl_swapchain_frame swframe;
-    if (!pl_swapchain_start_frame(p->swapchain, &swframe)) {
-        if (frame->current) {
-            struct pl_queue_params qparams = *pl_queue_params(
-                .pts = frame->current->pts + pts_offset,
-                .radius = pl_frame_mix_radius(&p->pars->params),
-            );
-            pl_queue_update(p->queue, NULL, &qparams);
+    bool use_application_swframe = false;
+    {
+        struct pl_swapchain_frame *application_swframe = get_mpv_render_param(params, 
+            (mpv_render_param_type) MPV_RENDER_PARAM_LIBPLACEBO_FRAME, NULL);
+        if (!application_swframe) {
+            if (!pl_swapchain_start_frame(p->swapchain, &swframe)) {
+                if (frame->current) {
+                    struct pl_queue_params qparams = *pl_queue_params(
+                        .pts = frame->current->pts + pts_offset,
+                        .radius = pl_frame_mix_radius(&p->pars->params),
+                    );
+                    pl_queue_update(p->queue, NULL, &qparams);
+                }
+                return MPV_ERROR_GENERIC;
+            }    
+        } else {
+            swframe = *application_swframe;
+            use_application_swframe = true;
         }
-        return MPV_ERROR_GENERIC;
     }
 
     p->last_w = swframe.fbo->params.w;
@@ -755,12 +764,14 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     pl_gpu_flush(p->gpu);
 
 submit:
-    if (!pl_swapchain_submit_frame(p->swapchain)) {
-        MP_ERR(p, "Failed submitting frame to swapchain!\n");
-        return MPV_ERROR_GENERIC;
-    }
-    if (!p->external_swapchain_swap_buffers) {
-        pl_swapchain_swap_buffers(p->swapchain);
+    if (!use_application_swframe) {
+        if (!pl_swapchain_submit_frame(p->swapchain)) {
+            MP_ERR(p, "Failed submitting frame to swapchain!\n");
+            return MPV_ERROR_GENERIC;
+        }
+        if (!p->external_swapchain_swap_buffers) {
+            pl_swapchain_swap_buffers(p->swapchain);
+        }
     }
 
     return 0;
