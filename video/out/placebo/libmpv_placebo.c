@@ -97,10 +97,6 @@ struct priv {
 
     int last_w;
     int last_h;
-
-    // If true, the user will be responsible to call pl_swapchain_swap_buffers() after rendering.
-    // This is useful for when the user wants to control the swapchain swap buffers themselves.
-    bool external_swapchain_swap_buffers;
 };
 
 static void update_options(struct priv *p);
@@ -308,9 +304,6 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     mp_mutex_init(&p->dr_lock);
 
     p->last_h = p->last_w = 0;
-    p->external_swapchain_swap_buffers = 
-        GET_MPV_RENDER_PARAM(params, (mpv_render_param_type) MPV_RENDER_PARAM_LIBPLACEBO_EXTERNAL_SWAPCHAIN_SWAP_BUFFERS,
-        bool, false);
     return 0;
 }
 
@@ -769,9 +762,8 @@ submit:
             MP_ERR(p, "Failed submitting frame to swapchain!\n");
             return MPV_ERROR_GENERIC;
         }
-        if (!p->external_swapchain_swap_buffers) {
-            pl_swapchain_swap_buffers(p->swapchain);
-        }
+
+        pl_swapchain_swap_buffers(p->swapchain);
     }
 
     return 0;
