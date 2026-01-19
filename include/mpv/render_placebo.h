@@ -90,23 +90,17 @@ extern "C" {
      MPV_RENDER_PARAM_LIBPLACEBO_OPTIONS = 103,
 
      /**
-      * Optional for mpv_render_context_create().
-      * Type: bool
-      *
-      * If true, the user will be responsible to call pl_swapchain_swap_buffers() after rendering.
-      */
-     MPV_RENDER_PARAM_LIBPLACEBO_EXTERNAL_SWAPCHAIN_SWAP_BUFFERS = 104,
-
-     /**
       * Optional for mpv_render_context_render().
       * Type: pl_swapchain_frame (from libplacebo)
       *
-      * A libplacebo frame to render. If not provided, mpv will start a
-      * new swapchain frame and render to it.
-      * If the frame is provided, mpv will not submit the frame to the swapchain and will not call pl_swapchain_swap_buffers().
+      * A libplacebo frame to render to. If not provided, mpv will start a
+      * new swapchain frame and render to it, submit the frame to the swapchain and call pl_swapchain_swap_buffers(). The user
+      * MUST NOT call pl_swapchain_submit_frame() and pl_swapchain_swap_buffers() after rendering.
+      * If the frame is provided, mpv will not submit the frame to the swapchain and will not call pl_swapchain_swap_buffers(),
+      * and the user will be responsible to call pl_swapchain_submit_frame() and pl_swapchain_swap_buffers().
       * The frame must be valid for the lifetime of the render context.
       */
-     MPV_RENDER_PARAM_LIBPLACEBO_FRAME = 105
+     MPV_RENDER_PARAM_LIBPLACEBO_FRAME = 104
  };
 
 /**
