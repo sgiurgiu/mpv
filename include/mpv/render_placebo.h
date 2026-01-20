@@ -57,6 +57,11 @@ extern "C" {
  * - Make sure to keep the swapchain valid for the lifetime of the render context
  * - Make sure to use the same libplacebo library version that the mpv library has been compiled with.
  */
+
+ typedef struct mpv_render_rect_t {
+    int x0, y0;
+    int x1, y1;
+ } *mpv_render_rect;
  
  enum {
  
@@ -100,7 +105,14 @@ extern "C" {
       * and the user will be responsible to call pl_swapchain_submit_frame() and pl_swapchain_swap_buffers().
       * The frame must be valid for the lifetime of the render context.
       */
-     MPV_RENDER_PARAM_LIBPLACEBO_FRAME = 104
+     MPV_RENDER_PARAM_LIBPLACEBO_FRAME = 104,
+     /**
+      * Optional for mpv_render_context_render().
+      * Type: mpv_render_rect
+      *
+      * The viewport rectangle to render to. If not provided, mpv will render to the entire viewport.
+      */
+     MPV_RENDER_PARAM_LIBPLACEBO_VIEWPORT = 105
  };
 
 /**

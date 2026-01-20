@@ -569,7 +569,8 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
                   struct vo_frame *frame)
 {
     struct priv *p = ctx->priv;
-
+    mpv_render_rect viewport = get_mpv_render_param(params, 
+        (mpv_render_param_type) MPV_RENDER_PARAM_LIBPLACEBO_VIEWPORT, NULL);
     update_options(p);
 
     const struct gl_video_opts *opts = p->opts_cache->opts;
@@ -658,6 +659,48 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
 
     p->last_w = swframe.fbo->params.w;
     p->last_h = swframe.fbo->params.h;
+
+    if (viewport) {
+        // Get video dimensions
+        int video_w = p->src.x1 - p->src.x0;
+        int video_h = p->src.y1 - p->src.y0;
+        if (video_w <= 0 || video_h <= 0) {
+            // Fallback to image params if src not set
+            video_w = swframe.fbo->params.w;
+            video_h = swframe.fbo->params.h;
+        }
+        
+        // Get viewport dimensions
+        double vp_w = viewport->x1 - viewport->x0;
+        double vp_h = viewport->y1 - viewport->y0;
+        
+        // Calculate aspect ratios
+        double video_aspect = (double)video_w / video_h;
+        double viewport_aspect = vp_w / vp_h;
+        
+        // Calculate destination rect that fits video in viewport with aspect ratio
+        double dst_w, dst_h;
+        if (video_aspect > viewport_aspect) {
+            // Video is wider - fit to width
+            dst_w = vp_w;
+            dst_h = vp_w / video_aspect;
+        } else {
+            // Video is taller - fit to height
+            dst_h = vp_h;
+            dst_w = vp_h * video_aspect;
+        }
+        
+        // Center in viewport
+        double offset_x = (vp_w - dst_w) / 2.0;
+        double offset_y = (vp_h - dst_h) / 2.0;
+        
+        // Set destination crop
+        p->dst.x0 = viewport->x0 + offset_x;
+        p->dst.y0 = viewport->y0 + offset_y;
+        p->dst.x1 = viewport->x0 + offset_x + dst_w;
+        p->dst.y1 = viewport->y0 + offset_y + dst_h;
+    }
+
 
     struct pl_frame target;
     pl_frame_from_swapchain(&target, &swframe);
