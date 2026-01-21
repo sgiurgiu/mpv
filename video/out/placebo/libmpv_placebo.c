@@ -20,6 +20,7 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders/lut.h>
 #include <libplacebo/log.h>
+#include <libplacebo/swapchain.h>
 #include <libplacebo/utils/libav.h>
 #include <libplacebo/utils/frame_queue.h>
 
@@ -635,13 +636,14 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
 
     pl_swapchain_colorspace_hint(p->swapchain, NULL);
     // Start swapchain frame
-    struct pl_swapchain_frame swframe;
+    struct pl_swapchain_frame* swframe = NULL;
+    struct pl_swapchain_frame internal_swframe;
     bool use_application_swframe = false;
     {
         struct pl_swapchain_frame *application_swframe = get_mpv_render_param(params, 
             (mpv_render_param_type) MPV_RENDER_PARAM_LIBPLACEBO_FRAME, NULL);
         if (!application_swframe) {
-            if (!pl_swapchain_start_frame(p->swapchain, &swframe)) {
+            if (!pl_swapchain_start_frame(p->swapchain, &internal_swframe)) {
                 if (frame->current) {
                     struct pl_queue_params qparams = *pl_queue_params(
                         .pts = frame->current->pts + pts_offset,
@@ -651,14 +653,15 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
                 }
                 return MPV_ERROR_GENERIC;
             }    
+            swframe = &internal_swframe;
         } else {
-            swframe = *application_swframe;
+            swframe = application_swframe;
             use_application_swframe = true;
         }
     }
 
-    p->last_w = swframe.fbo->params.w;
-    p->last_h = swframe.fbo->params.h;
+    p->last_w = swframe->fbo->params.w;
+    p->last_h = swframe->fbo->params.h;
 
     if (viewport) {
         // Get video dimensions
@@ -666,8 +669,8 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
         int video_h = p->src.y1 - p->src.y0;
         if (video_w <= 0 || video_h <= 0) {
             // Fallback to image params if src not set
-            video_w = swframe.fbo->params.w;
-            video_h = swframe.fbo->params.h;
+            video_w = swframe->fbo->params.w;
+            video_h = swframe->fbo->params.h;
         }
         
         // Get viewport dimensions
@@ -703,7 +706,7 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
 
 
     struct pl_frame target;
-    pl_frame_from_swapchain(&target, &swframe);
+    pl_frame_from_swapchain(&target, swframe);
     target.overlays = NULL;
     target.num_overlays = 0;
 
@@ -719,8 +722,8 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
         target.crop = (struct pl_rect2df) {
             .x0 = 0,
             .y0 = 0,
-            .x1 = swframe.fbo->params.w,
-            .y1 = swframe.fbo->params.h,
+            .x1 = swframe->fbo->params.w,
+            .y1 = swframe->fbo->params.h,
         };
     }
 
@@ -746,7 +749,7 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
         switch (pl_queue_update(p->queue, &mix, &qparams)) {
         case PL_QUEUE_ERR:
             MP_ERR(p, "Failed updating frame queue!\n");
-            pl_tex_clear(p->gpu, swframe.fbo, (float[4]){ 0.5, 0.0, 1.0, 1.0 });
+            pl_tex_clear(p->gpu, swframe->fbo, (float[4]){ 0.5, 0.0, 1.0, 1.0 });
             goto submit;
         case PL_QUEUE_EOF:
         case PL_QUEUE_MORE:
@@ -789,10 +792,10 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     if (mix.num_frames > 0) {
         if (!pl_render_image_mix(p->rr, &mix, &target, &render_params)) {
             MP_ERR(p, "Failed rendering frame!\n");
-            pl_tex_clear(p->gpu, swframe.fbo, (float[4]){ 0.5, 0.0, 1.0, 1.0 });
+            pl_tex_clear(p->gpu, swframe->fbo, (float[4]){ 0.5, 0.0, 1.0, 1.0 });
         }
     } else {
-        pl_tex_clear(p->gpu, swframe.fbo, (float[4]){ 0.0, 0.0, 0.0, 1.0 });
+        pl_tex_clear(p->gpu, swframe->fbo, (float[4]){ 0.0, 0.0, 0.0, 1.0 });
     }
     
 
