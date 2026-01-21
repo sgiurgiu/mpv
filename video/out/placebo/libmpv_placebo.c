@@ -807,6 +807,8 @@ submit:
         }
 
         pl_swapchain_swap_buffers(p->swapchain);
+    } else {
+        pl_gpu_finish(p->gpu);
     }
 
     return 0;
