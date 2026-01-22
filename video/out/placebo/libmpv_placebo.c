@@ -634,7 +634,7 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
         p->last_id = id;
     }
 
-    pl_swapchain_colorspace_hint(p->swapchain, NULL);
+    //pl_swapchain_colorspace_hint(p->swapchain, NULL);
     // Start swapchain frame
     struct pl_swapchain_frame* swframe = NULL;
     struct pl_swapchain_frame internal_swframe;
@@ -811,7 +811,7 @@ submit:
 
         pl_swapchain_swap_buffers(p->swapchain);
     } else {
-        pl_gpu_finish(p->gpu);
+        //pl_gpu_finish(p->gpu);
     }
 
     return 0;
