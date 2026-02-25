@@ -62,9 +62,10 @@ extern "C" {
     int x0, y0;
     int x1, y1;
  } *mpv_render_rect;
- 
- enum {
- 
+
+ enum
+ {
+
      /**
       * Required for mpv_render_context_create().
       * Type: pl_swapchain (from libplacebo)
@@ -76,7 +77,7 @@ extern "C" {
       * The swapchain must remain valid for the lifetime of the render context.
       */
      MPV_RENDER_PARAM_LIBPLACEBO_SWAPCHAIN = 101,
- 
+
      /**
       * Optional for mpv_render_context_create().
       * Type: pl_log (from libplacebo)
@@ -89,8 +90,8 @@ extern "C" {
       * Optional for mpv_render_context_render().
       * Type: pl_options (from libplacebo)
       *
-      * A libplacebo options context for passing rendering options. If not provided,
-      * mpv will use the default options.
+      * A libplacebo options context for passing rendering options. If not
+      * provided, mpv will use the default options.
       */
      MPV_RENDER_PARAM_LIBPLACEBO_OPTIONS = 103,
 
@@ -99,18 +100,22 @@ extern "C" {
       * Type: pl_swapchain_frame (from libplacebo)
       *
       * A libplacebo frame to render to. If not provided, mpv will start a
-      * new swapchain frame and render to it, submit the frame to the swapchain and call pl_swapchain_swap_buffers(). The user
-      * MUST NOT call pl_swapchain_submit_frame() and pl_swapchain_swap_buffers() after rendering.
-      * If the frame is provided, mpv will not submit the frame to the swapchain and will not call pl_swapchain_swap_buffers(),
-      * and the user will be responsible to call pl_swapchain_submit_frame() and pl_swapchain_swap_buffers().
-      * The frame must be valid for the lifetime of the render context.
+      * new swapchain frame and render to it, submit the frame to the swapchain
+      * and call pl_swapchain_swap_buffers(). The user MUST NOT call
+      * pl_swapchain_submit_frame() and pl_swapchain_swap_buffers() after
+      * rendering. If the frame is provided, mpv will not submit the frame to
+      * the swapchain and will not call pl_swapchain_swap_buffers(), and the
+      * user will be responsible to call pl_swapchain_submit_frame() and
+      * pl_swapchain_swap_buffers(). The frame must be valid for the lifetime of
+      * the render context.
       */
      MPV_RENDER_PARAM_LIBPLACEBO_FRAME = 104,
      /**
       * Optional for mpv_render_context_render().
       * Type: mpv_render_rect
       *
-      * The viewport rectangle to render to. If not provided, mpv will render to the entire viewport.
+      * The viewport rectangle to render to. If not provided, mpv will render to
+      * the entire viewport.
       */
      MPV_RENDER_PARAM_LIBPLACEBO_VIEWPORT = 105,
 
@@ -118,20 +123,22 @@ extern "C" {
       * Optional for mpv_render_context_render().
       * Type: pl_color_space * (from libplacebo)
       *
-      * Target output colorspace. If provided, mpv will use it for the
-      * swapchain colorspace hint (so the display/compositor is told the
-      * correct output format) and for the render target (so tone mapping
-      * and conversion output to this colorspace). The client can use this
-      * to force HDR (e.g. PQ with max_luma), SDR, or specific primaries.
-      * If not provided, default behavior is used (no display-derived target).
+      * Target output colorspace. Recommended: pass the colorspace that
+      * matches your swapchain/display (e.g. from the compositor or the
+      * frame you get from the swapchain). mpv uses it for the swapchain
+      * colorspace hint (so Vulkan/Wayland etc. are told the correct
+      * format) and for the render target (tone mapping outputs to this).
+      * If not provided, no display-derived target is used (fallback).
+      * You can also pass a different colorspace to override the display
+      * (e.g. force SDR on an HDR display).
       */
      MPV_RENDER_PARAM_LIBPLACEBO_TARGET_COLORSPACE = 106
  };
 
-/**
- * API type string for libplacebo backend.
- * Use with MPV_RENDER_PARAM_API_TYPE.
- */
+ /**
+  * API type string for libplacebo backend.
+  * Use with MPV_RENDER_PARAM_API_TYPE.
+  */
  #define MPV_RENDER_API_TYPE_LIBPLACEBO "libplacebo"
 
 #ifdef __cplusplus
