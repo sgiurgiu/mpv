@@ -635,8 +635,10 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
                   struct vo_frame *frame)
 {
     struct priv *p = ctx->priv;
-    mpv_render_rect viewport = get_mpv_render_param(params, 
+    mpv_render_rect viewport = get_mpv_render_param(params,
         (mpv_render_param_type) MPV_RENDER_PARAM_LIBPLACEBO_VIEWPORT, NULL);
+    const struct pl_color_space *client_target_csp = get_mpv_render_param(params,
+        (mpv_render_param_type) MPV_RENDER_PARAM_LIBPLACEBO_TARGET_COLORSPACE, NULL);
     update_options(p);
 
     const struct gl_video_opts *opts = p->opts_cache->opts;
@@ -700,25 +702,37 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     }
 
     struct pl_color_space target_csp = { 0 };
-    if (target_csp.primaries == PL_COLOR_PRIM_UNKNOWN)
-        target_csp.primaries = get_best_prim_container(&target_csp.hdr.prim);
-    if (!pl_color_transfer_is_hdr(target_csp.transfer))
-    {
-        // limit min_luma to 1000:1 contrast ratio in SDR mode
-        if (target_csp.hdr.min_luma > PL_COLOR_SDR_WHITE / PL_COLOR_SDR_CONTRAST)
-            target_csp.hdr.min_luma = 0;
-        // Don't use reported display peak in SDR mode. Mostly because
-        // libplacebo forcefully switches to PQ if hinting hdr metadata,
-        // ignoring the transfer set in the hint. But also because setting
-        // target peak in SDR mode is very specific usecase, needs proper
-        // calibration, users can set it manually.
-        target_csp.hdr.max_luma = 0;
-        target_csp.hdr.max_cll = 0;
+    if (client_target_csp) {
+        target_csp = *client_target_csp;
+        if (!pl_color_transfer_is_hdr(target_csp.transfer)) {
+            if (target_csp.hdr.min_luma > PL_COLOR_SDR_WHITE / PL_COLOR_SDR_CONTRAST)
+                target_csp.hdr.min_luma = 0;
+            target_csp.hdr.max_luma = 0;
+            target_csp.hdr.max_cll = 0;
+            target_csp.hdr.max_fall = 0;
+        }
+        target_csp.hdr.max_fall = 0;
+    } else {
+        if (target_csp.primaries == PL_COLOR_PRIM_UNKNOWN)
+            target_csp.primaries = get_best_prim_container(&target_csp.hdr.prim);
+        if (!pl_color_transfer_is_hdr(target_csp.transfer))
+        {
+            // limit min_luma to 1000:1 contrast ratio in SDR mode
+            if (target_csp.hdr.min_luma > PL_COLOR_SDR_WHITE / PL_COLOR_SDR_CONTRAST)
+                target_csp.hdr.min_luma = 0;
+            // Don't use reported display peak in SDR mode. Mostly because
+            // libplacebo forcefully switches to PQ if hinting hdr metadata,
+            // ignoring the transfer set in the hint. But also because setting
+            // target peak in SDR mode is very specific usecase, needs proper
+            // calibration, users can set it manually.
+            target_csp.hdr.max_luma = 0;
+            target_csp.hdr.max_cll = 0;
+            target_csp.hdr.max_fall = 0;
+        }
+        // maxFALL in display metadata is in fact MaxFullFrameLuminance. Wayland
+        // reports it as maxFALL directly, but this doesn't mean the same thing.
         target_csp.hdr.max_fall = 0;
     }
-    // maxFALL in display metadata is in fact MaxFullFrameLuminance. Wayland
-    // reports it as maxFALL directly, but this doesn't mean the same thing.
-    target_csp.hdr.max_fall = 0;
 
     struct pl_color_space hint = { 0 };
     if (frame->current)
@@ -868,6 +882,12 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
             .x1 = swframe->fbo->params.w,
             .y1 = swframe->fbo->params.h,
         };
+    }
+
+    // Apply client target colorspace to render target so pipeline outputs to it
+    if (client_target_csp) {
+        target.color = *client_target_csp;
+        apply_target_contrast(p, &target.color, target.color.hdr.min_luma);
     }
 
     // Get frame mix from queue

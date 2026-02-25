@@ -112,7 +112,20 @@ extern "C" {
       *
       * The viewport rectangle to render to. If not provided, mpv will render to the entire viewport.
       */
-     MPV_RENDER_PARAM_LIBPLACEBO_VIEWPORT = 105
+     MPV_RENDER_PARAM_LIBPLACEBO_VIEWPORT = 105,
+
+     /**
+      * Optional for mpv_render_context_render().
+      * Type: pl_color_space * (from libplacebo)
+      *
+      * Target output colorspace. If provided, mpv will use it for the
+      * swapchain colorspace hint (so the display/compositor is told the
+      * correct output format) and for the render target (so tone mapping
+      * and conversion output to this colorspace). The client can use this
+      * to force HDR (e.g. PQ with max_luma), SDR, or specific primaries.
+      * If not provided, default behavior is used (no display-derived target).
+      */
+     MPV_RENDER_PARAM_LIBPLACEBO_TARGET_COLORSPACE = 106
  };
 
 /**
