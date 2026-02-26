@@ -713,8 +713,7 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
         }
         target_csp.hdr.max_fall = 0;
     } else {
-        if (target_csp.primaries == PL_COLOR_PRIM_UNKNOWN)
-            target_csp.primaries = get_best_prim_container(&target_csp.hdr.prim);
+        target_csp.primaries = get_best_prim_container(&target_csp.hdr.prim);
         if (!pl_color_transfer_is_hdr(target_csp.transfer))
         {
             // limit min_luma to 1000:1 contrast ratio in SDR mode
@@ -737,53 +736,59 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
     struct pl_color_space hint = { 0 };
     if (frame->current)
     {
-        const struct pl_color_space *source = &frame->current->params.color;
-        const struct pl_color_space *target = &target_csp;
-        hint = *source;
-        if (!hint.hdr.min_luma)
-            hint.hdr.min_luma = target->hdr.min_luma;
-        // assume target hint mode is 0
-        hint = *target;
-        if (pl_color_transfer_is_hdr(hint.transfer) &&
-            !pl_primaries_valid(&hint.hdr.prim))
-            pl_color_space_merge(&hint, source);
-        if (target->transfer == PL_COLOR_TRC_UNKNOWN && !opts->target_trc &&
-            !pl_color_transfer_is_hdr(source->transfer))
+        if (client_target_csp) {
+            // Trust client target (e.g. frame->color_space): use it as hint
+            // with only the sanitization already applied in target_csp.
+            hint = target_csp;
+        } else {
+            const struct pl_color_space *source = &frame->current->params.color;
+            const struct pl_color_space *target = &target_csp;
             hint = *source;
-        if (hint.transfer == PL_COLOR_TRC_GAMMA22)
-            hint.transfer = PL_COLOR_TRC_SRGB;
-        if (target->hdr.max_luma)
-        {
-            hint.hdr.max_luma = target->hdr.max_luma;
-            hint.hdr.min_luma = target->hdr.min_luma;
-            hint.hdr.max_cll = target->hdr.max_cll;
-            hint.hdr.max_fall = target->hdr.max_fall;
-        }
-        struct pl_color_space source_csp = *source;
-        pl_color_space_infer_map(&source_csp, &hint);
-        // Always prefer target luminance and transfer for inverse tone mapping
-        if (pl_color_transfer_is_hdr(target->transfer) && opts->tone_map.inverse)
-        {
-            hint.transfer = target->transfer;
-            hint.hdr.max_luma = target->hdr.max_luma;
-            hint.hdr.min_luma = target->hdr.min_luma;
-            hint.hdr.max_cll = target->hdr.max_cll;
-            hint.hdr.max_fall = target->hdr.max_fall;
-        }
-        if (!hint.hdr.max_cll)
-            hint.hdr.max_cll = hint.hdr.max_luma;
-        if (source->hdr.max_luma > hint.hdr.max_luma || opts->tone_map.inverse)
-        {
-            // Set maxCLL to the target luminance if it's not already lower
-            if (!hint.hdr.max_cll || hint.hdr.max_luma < hint.hdr.max_cll ||
-                opts->tone_map.inverse)
+            if (!hint.hdr.min_luma)
+                hint.hdr.min_luma = target->hdr.min_luma;
+            // assume target hint mode is 0
+            hint = *target;
+            if (pl_color_transfer_is_hdr(hint.transfer) &&
+                !pl_primaries_valid(&hint.hdr.prim))
+                pl_color_space_merge(&hint, source);
+            if (target->transfer == PL_COLOR_TRC_UNKNOWN && !opts->target_trc &&
+                !pl_color_transfer_is_hdr(source->transfer))
+                hint = *source;
+            if (hint.transfer == PL_COLOR_TRC_GAMMA22)
+                hint.transfer = PL_COLOR_TRC_SRGB;
+            if (target->hdr.max_luma)
+            {
+                hint.hdr.max_luma = target->hdr.max_luma;
+                hint.hdr.min_luma = target->hdr.min_luma;
+                hint.hdr.max_cll = target->hdr.max_cll;
+                hint.hdr.max_fall = target->hdr.max_fall;
+            }
+            struct pl_color_space source_csp = *source;
+            pl_color_space_infer_map(&source_csp, &hint);
+            // Always prefer target luminance and transfer for inverse tone mapping
+            if (pl_color_transfer_is_hdr(target->transfer) && opts->tone_map.inverse)
+            {
+                hint.transfer = target->transfer;
+                hint.hdr.max_luma = target->hdr.max_luma;
+                hint.hdr.min_luma = target->hdr.min_luma;
+                hint.hdr.max_cll = target->hdr.max_cll;
+                hint.hdr.max_fall = target->hdr.max_fall;
+            }
+            if (!hint.hdr.max_cll)
                 hint.hdr.max_cll = hint.hdr.max_luma;
-            // There's no reliable way to estimate maxFALL here
-            hint.hdr.max_fall = 0;
+            if (source->hdr.max_luma > hint.hdr.max_luma || opts->tone_map.inverse)
+            {
+                // Set maxCLL to the target luminance if it's not already lower
+                if (!hint.hdr.max_cll || hint.hdr.max_luma < hint.hdr.max_cll ||
+                    opts->tone_map.inverse)
+                    hint.hdr.max_cll = hint.hdr.max_luma;
+                // There's no reliable way to estimate maxFALL here
+                hint.hdr.max_fall = 0;
+            }
+            if (hint.hdr.max_cll && hint.hdr.max_fall > hint.hdr.max_cll)
+                hint.hdr.max_fall = 0;
+            apply_target_contrast(p, &hint, hint.hdr.min_luma);
         }
-        if (hint.hdr.max_cll && hint.hdr.max_fall > hint.hdr.max_cll)
-            hint.hdr.max_fall = 0;
-        apply_target_contrast(p, &hint, hint.hdr.min_luma);
 
         pl_swapchain_colorspace_hint_unlocked(p->swapchain, &hint);
     }
