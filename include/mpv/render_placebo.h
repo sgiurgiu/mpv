@@ -118,21 +118,6 @@ extern "C" {
       * the entire viewport.
       */
      MPV_RENDER_PARAM_LIBPLACEBO_VIEWPORT = 105,
-
-     /**
-      * Optional for mpv_render_context_render().
-      * Type: pl_color_space * (from libplacebo)
-      *
-      * Target output colorspace. Recommended: pass the colorspace that
-      * matches your swapchain/display (e.g. from the compositor or the
-      * frame you get from the swapchain). mpv uses it for the swapchain
-      * colorspace hint (so Vulkan/Wayland etc. are told the correct
-      * format) and for the render target (tone mapping outputs to this).
-      * If not provided, no display-derived target is used (fallback).
-      * You can also pass a different colorspace to override the display
-      * (e.g. force SDR on an HDR display).
-      */
-     MPV_RENDER_PARAM_LIBPLACEBO_TARGET_COLORSPACE = 106
  };
 
  /**
