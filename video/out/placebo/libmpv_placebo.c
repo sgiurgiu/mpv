@@ -599,46 +599,13 @@ get_best_prim_container(const struct pl_raw_primaries *gamut)
     return container;
 }
 
-static void apply_target_contrast(struct priv *p,
-                                  struct pl_color_space *color,
-                                  float min_luma)
-{
-    const struct gl_video_opts *opts = p->opts_cache->opts;
-
-    // Auto mode, use target value if available
-    if (!opts->target_contrast)
-    {
-        color->hdr.min_luma = min_luma;
-        return;
-    }
-
-    // Infinite contrast
-    if (opts->target_contrast == -1)
-    {
-        color->hdr.min_luma = 1e-7;
-        mp_assert(color->hdr.min_luma > 0);
-        return;
-    }
-
-    // Infer max_luma for current pl_color_space
-    pl_color_space_nominal_luma_ex(
-        pl_nominal_luma_params(.color = color,
-                               // with HDR10 meta to respect value if already set
-                               .metadata = PL_HDR_METADATA_HDR10,
-                               .scaling = PL_HDR_NITS,
-                               .out_max = &color->hdr.max_luma));
-
-    color->hdr.min_luma = color->hdr.max_luma / opts->target_contrast;
-}
-
 static int render(struct render_backend *ctx, mpv_render_param *params,
                   struct vo_frame *frame)
 {
     struct priv *p = ctx->priv;
-    mpv_render_rect viewport = get_mpv_render_param(params,
-        (mpv_render_param_type) MPV_RENDER_PARAM_LIBPLACEBO_VIEWPORT, NULL);
-    const struct pl_color_space *client_target_csp = get_mpv_render_param(params,
-        (mpv_render_param_type) MPV_RENDER_PARAM_LIBPLACEBO_TARGET_COLORSPACE, NULL);
+    mpv_render_rect viewport = get_mpv_render_param(
+        params, (mpv_render_param_type)MPV_RENDER_PARAM_LIBPLACEBO_VIEWPORT,
+        NULL);
     update_options(p);
 
     const struct gl_video_opts *opts = p->opts_cache->opts;
@@ -699,102 +666,6 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
         });
 
         p->last_id = id;
-    }
-
-    struct pl_color_space target_csp = { 0 };
-    if (client_target_csp) {
-        target_csp = *client_target_csp;
-        if (!pl_color_transfer_is_hdr(target_csp.transfer)) {
-            if (target_csp.hdr.min_luma > PL_COLOR_SDR_WHITE / PL_COLOR_SDR_CONTRAST)
-                target_csp.hdr.min_luma = 0;
-            target_csp.hdr.max_luma = 0;
-            target_csp.hdr.max_cll = 0;
-            target_csp.hdr.max_fall = 0;
-        }
-        target_csp.hdr.max_fall = 0;
-    } else {
-        target_csp.primaries = get_best_prim_container(&target_csp.hdr.prim);
-        if (!pl_color_transfer_is_hdr(target_csp.transfer))
-        {
-            // limit min_luma to 1000:1 contrast ratio in SDR mode
-            if (target_csp.hdr.min_luma > PL_COLOR_SDR_WHITE / PL_COLOR_SDR_CONTRAST)
-                target_csp.hdr.min_luma = 0;
-            // Don't use reported display peak in SDR mode. Mostly because
-            // libplacebo forcefully switches to PQ if hinting hdr metadata,
-            // ignoring the transfer set in the hint. But also because setting
-            // target peak in SDR mode is very specific usecase, needs proper
-            // calibration, users can set it manually.
-            target_csp.hdr.max_luma = 0;
-            target_csp.hdr.max_cll = 0;
-            target_csp.hdr.max_fall = 0;
-        }
-        // maxFALL in display metadata is in fact MaxFullFrameLuminance. Wayland
-        // reports it as maxFALL directly, but this doesn't mean the same thing.
-        target_csp.hdr.max_fall = 0;
-    }
-
-    struct pl_color_space hint = { 0 };
-    if (frame->current)
-    {
-        if (client_target_csp) {
-            // Trust client target (e.g. frame->color_space): use it as hint
-            // with only the sanitization already applied in target_csp.
-            hint = target_csp;
-        } else {
-            const struct pl_color_space *source = &frame->current->params.color;
-            const struct pl_color_space *target = &target_csp;
-            hint = *source;
-            if (!hint.hdr.min_luma)
-                hint.hdr.min_luma = target->hdr.min_luma;
-            // assume target hint mode is 0
-            hint = *target;
-            if (pl_color_transfer_is_hdr(hint.transfer) &&
-                !pl_primaries_valid(&hint.hdr.prim))
-                pl_color_space_merge(&hint, source);
-            if (target->transfer == PL_COLOR_TRC_UNKNOWN && !opts->target_trc &&
-                !pl_color_transfer_is_hdr(source->transfer))
-                hint = *source;
-            if (hint.transfer == PL_COLOR_TRC_GAMMA22)
-                hint.transfer = PL_COLOR_TRC_SRGB;
-            if (target->hdr.max_luma)
-            {
-                hint.hdr.max_luma = target->hdr.max_luma;
-                hint.hdr.min_luma = target->hdr.min_luma;
-                hint.hdr.max_cll = target->hdr.max_cll;
-                hint.hdr.max_fall = target->hdr.max_fall;
-            }
-            struct pl_color_space source_csp = *source;
-            pl_color_space_infer_map(&source_csp, &hint);
-            // Always prefer target luminance and transfer for inverse tone mapping
-            if (pl_color_transfer_is_hdr(target->transfer) && opts->tone_map.inverse)
-            {
-                hint.transfer = target->transfer;
-                hint.hdr.max_luma = target->hdr.max_luma;
-                hint.hdr.min_luma = target->hdr.min_luma;
-                hint.hdr.max_cll = target->hdr.max_cll;
-                hint.hdr.max_fall = target->hdr.max_fall;
-            }
-            if (!hint.hdr.max_cll)
-                hint.hdr.max_cll = hint.hdr.max_luma;
-            if (source->hdr.max_luma > hint.hdr.max_luma || opts->tone_map.inverse)
-            {
-                // Set maxCLL to the target luminance if it's not already lower
-                if (!hint.hdr.max_cll || hint.hdr.max_luma < hint.hdr.max_cll ||
-                    opts->tone_map.inverse)
-                    hint.hdr.max_cll = hint.hdr.max_luma;
-                // There's no reliable way to estimate maxFALL here
-                hint.hdr.max_fall = 0;
-            }
-            if (hint.hdr.max_cll && hint.hdr.max_fall > hint.hdr.max_cll)
-                hint.hdr.max_fall = 0;
-            apply_target_contrast(p, &hint, hint.hdr.min_luma);
-        }
-
-        pl_swapchain_colorspace_hint_unlocked(p->swapchain, &hint);
-    }
-    else
-    {
-        pl_swapchain_colorspace_hint_unlocked(p->swapchain, NULL);
     }
 
     // Start swapchain frame
@@ -887,12 +758,6 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
             .x1 = swframe->fbo->params.w,
             .y1 = swframe->fbo->params.h,
         };
-    }
-
-    // Apply client target colorspace to render target so pipeline outputs to it
-    if (client_target_csp) {
-        target.color = *client_target_csp;
-        apply_target_contrast(p, &target.color, target.color.hdr.min_luma);
     }
 
     // Get frame mix from queue
