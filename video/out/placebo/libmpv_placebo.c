@@ -293,9 +293,11 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
     p->pars = pl_options_alloc(p->pllog);
     p->opts_cache = m_config_cache_alloc(p, p->global, &gl_video_conf);
 
-    // Note: Hardware decoding is not supported in this backend.
-    // The libmpv render API with external swapchain doesn't have ra_ctx,
-    // which is required by mpv's hwdec system. Use --hwdec=no.
+    // Note: Hardware decoding not supported by this backend.
+    // libmpv render API with external swapchain doesn't have ra_ctx,
+    // required by libmpv's hwdec structure.
+    // TODO: Implement an alternative to ra_hwdec_driver for this backend.
+    // Or find some other way.
     ctx->hwdec_devs = NULL;
 
     // Set capabilities
@@ -312,8 +314,6 @@ static bool check_format(struct render_backend *ctx, int imgfmt)
 {
     struct priv *p = ctx->priv;
 
-    // Note: Hardware decoding is not supported in the libmpv render API
-    // with external swapchain. Use software decoding (--hwdec=no).
     return format_supported(p, imgfmt);
 }
 
@@ -566,39 +566,6 @@ static void discard_frame(const struct pl_source_frame *src)
     talloc_free(mpi);
 }
 
-static enum pl_color_primaries
-get_best_prim_container(const struct pl_raw_primaries *gamut)
-{
-    enum pl_color_primaries container = PL_COLOR_PRIM_UNKNOWN;
-
-    if (!pl_primaries_valid(gamut))
-        return container;
-
-    const struct pl_raw_primaries *best = NULL;
-    for (enum pl_color_primaries prim = 1; prim < PL_COLOR_PRIM_COUNT; prim++)
-    {
-        const struct pl_raw_primaries *raw = pl_raw_primaries_get(prim);
-        if (pl_raw_primaries_similar(raw, gamut))
-        {
-            container = prim;
-            best = raw;
-            break;
-        }
-
-        if (pl_primaries_superset(raw, gamut) &&
-            (!best || pl_primaries_superset(best, raw)))
-        {
-            container = prim;
-            best = raw;
-        }
-    }
-
-    if (!best)
-        container = PL_COLOR_PRIM_BT_2020;
-
-    return container;
-}
-
 static int render(struct render_backend *ctx, mpv_render_param *params,
                   struct vo_frame *frame)
 {
@@ -668,7 +635,6 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
         p->last_id = id;
     }
 
-    // Start swapchain frame
     struct pl_swapchain_frame* swframe = NULL;
     struct pl_swapchain_frame internal_swframe;
     bool use_application_swframe = false;
@@ -843,8 +809,6 @@ submit:
         }
 
         pl_swapchain_swap_buffers(p->swapchain);
-    } else {
-        //pl_gpu_finish(p->gpu);
     }
 
     return 0;
@@ -895,14 +859,14 @@ static struct mp_image *get_image(struct render_backend *ctx, int imgfmt,
 static void screenshot(struct render_backend *ctx, struct vo_frame *frame,
                        struct voctrl_screenshot *args)
 {
-    // Screenshot support would be implemented here
+    // Not implemented
     args->res = NULL;
 }
 
 static void perfdata(struct render_backend *ctx,
                      struct voctrl_performance_data *out)
 {
-    // Performance data collection would be implemented here
+    // Not implemented
     memset(out, 0, sizeof(*out));
 }
 
@@ -923,7 +887,6 @@ static void destroy(struct render_backend *ctx)
         pl_tex_destroy(p->gpu, &p->sub_tex[i]);
 
     // Destroy hwdec
-    // All DR buffers should be freed by now (decoder released them)
     mp_assert(p->num_dr_buffers == 0);
     mp_mutex_destroy(&p->dr_lock);
 
