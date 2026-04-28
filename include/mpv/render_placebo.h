@@ -26,10 +26,9 @@ extern "C" {
  * Libplacebo backend
  * ------------------------------------
  *
- * This header contains definitions for using the libplacebo renderer with the
- * render.h API. The libplacebo renderer uses libplacebo directly and provides
- * advanced rendering features like HDR tone mapping, frame interpolation,
- * and high-quality scaling.
+ * This header contains definitions for using the libplacebo renderer with
+ * the render.h API. The libplacebo renderer allows the user to use the
+ * libplacebo library directly.
  *
  * The client is responsible for:
  * - Creating and managing the graphics context (Vulkan instance/device or
@@ -40,28 +39,35 @@ extern "C" {
  *
  *   1. Create pl_log using pl_log_create()
  *   2. Create a Vulkan instance using pl_vk_inst_create() if using Vulkan
- *   3. Create a Vulkan or OpenGL context using pl_vk_create()/pl_vulkan_import() or pl_opengl_create()
- *   4. Create a pl_swapchain using pl_opengl_create_swapchain() or pl_vulkan_create_swapchain()
- *   5. Set mpv_set_property_string(mpv, "hwdec", "no"); on the mpv instance to disable hardware decoding
- *   6. Call mpv_render_context_create() with:
+ *   3. Create a Vulkan or OpenGL context using
+ *   pl_vk_create()/pl_vulkan_import() or pl_opengl_create()
+ *   4. Create a pl_swapchain using pl_opengl_create_swapchain() or
+ *   pl_vulkan_create_swapchain()
+ *   5. Call mpv_render_context_create() with:
  *      - MPV_RENDER_PARAM_API_TYPE = MPV_RENDER_API_TYPE_LIBPLACEBO
  *      - MPV_RENDER_PARAM_LIBPLACEBO_SWAPCHAIN = pl_swapchain
- *      - MPV_RENDER_PARAM_LIBPLACEBO_EXTERNAL_SWAPCHAIN_SWAP_BUFFERS = true if using external swapchain option
  *      - MPV_RENDER_PARAM_LIBPLACEBO_PL_LOG = pl_log
- *      - MPV_RENDER_PARAM_ADVANCED_CONTROL = 1 is recommended
- *   7. Render loop: mpv_render_context_render() then pl_swapchain_swap_buffers() if using external swapchain option is set to true
-
+ *   6. Create mpv_render_param array with the following parameters
+ *      (optional):
+ *      - MPV_RENDER_PARAM_LIBPLACEBO_OPTIONS = pl_options
+ *      - MPV_RENDER_PARAM_LIBPLACEBO_FRAME = pl_swapchain_frame
+ *      - MPV_RENDER_PARAM_LIBPLACEBO_VIEWPORT = mpv_render_rect
+ *   7. Render loop: mpv_render_context_render() then
+ *      pl_swapchain_submit_frame() and pl_swapchain_swap_buffers() if a
+ *      frame is provided
+ *
  * Main notes:
- * - Make sure to disable hardware decoding by setting mpv_set_property_string(mpv, "hwdec", "no"); on the mpv instance
- * - If using external swapchain option, make sure to call pl_swapchain_swap_buffers() after mpv_render_context_render() returns
- * - Make sure to keep the swapchain valid for the lifetime of the render context
- * - Make sure to use the same libplacebo library version that the mpv library has been compiled with.
+ * - Make sure to keep the swapchain valid for the lifetime of the render
+ *   context
+ * - Make sure to use the same libplacebo library version that the mpv
+ *   library has been compiled with.
  */
 
- typedef struct mpv_render_rect_t {
-    int x0, y0;
-    int x1, y1;
- } *mpv_render_rect;
+typedef struct mpv_render_rect_t
+{
+int x0, y0;
+int x1, y1;
+} *mpv_render_rect;
 
  enum
  {
